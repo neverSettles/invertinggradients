@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 trained_model = True
 arch = 'ResNet18'
 dataset_name = 'CIFAR10'
+distributed = True
 
 ## System setup:
 import inversefed
@@ -65,6 +66,8 @@ input_gradient = [grad.detach() for grad in avg_input_gradient]
 full_norm = torch.stack([g.norm() for g in input_gradient]).mean()
 print(f'Full gradient norm is {full_norm:e}.')
 
+config = dict()
+import time
 def reconstruct_image():
     config = dict(signed=True,
                   boxed=True,
@@ -74,14 +77,17 @@ def reconstruct_image():
                   lr=0.1,
                   optim='adam',
                   restarts=2,
-                  max_iterations=10,
+                  max_iterations=2400,
                   total_variation=1e-1,
                   init='randn',
                   filter='none',
                   lr_decay=True,
                   scoring_choice='loss')
+
+    start = time.time()
     rec_machine = inversefed.GradientReconstructor(models, (dm, ds), config, num_images=1)
     output, stats = rec_machine.reconstruct(input_gradient, all_labels, img_shape=(3, 32, 32))
+    print(f'Completing {config["max_iterations"]} iterations with {config["restarts"]} restarts took {time.time() - start} seconds')
 
     test_mse = sum([(output.detach() - gt).pow(2).mean() for gt in gts])
     feat_mse = sum([(model(output.detach()) - model(ground_truth)).pow(2).mean() for gt in gts])
@@ -119,4 +125,4 @@ def reconstruct_image():
 # Reconstruct the image
 output = reconstruct_image()
 output_denormalized = torch.clamp(output * ds + dm, 0, 1)
-torchvision.utils.save_image(output_denormalized, f'{idx}_{arch}_{dataset_name}_output.png')
+torchvision.utils.save_image(output_denormalized, f'{idx}_{arch}_{dataset_name}_trained={trained_model}_distributed={distributed}_iters*restarts={config["max_iterations"]*config["restarts"]}_output.png')
