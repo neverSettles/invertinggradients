@@ -47,7 +47,7 @@ class GradientReconstructor():
     def __init__(self, model, mean_std=(0.0, 1.0), config=DEFAULT_CONFIG, num_images=1):
         """Initialize with algorithm setup."""
         self.config = _validate_config(config)
-        self.model = model
+        self.models = [model]
         self.setup = dict(device=next(model.parameters()).device, dtype=next(model.parameters()).dtype)
 
         self.mean_std = mean_std
@@ -63,28 +63,31 @@ class GradientReconstructor():
         """Reconstruct image from gradient."""
         start_time = time.time()
         if eval:
-            self.model.eval()
+            for model in self.models:
+                model.eval()
 
 
         stats = defaultdict(list)
         x = self._init_images(img_shape)
         scores = torch.zeros(self.config['restarts'])
 
-        if labels is None:
-            if self.num_images == 1 and self.iDLG:
-                # iDLG trick:
-                last_weight_min = torch.argmin(torch.sum(input_data[-2], dim=-1), dim=-1)
-                labels = last_weight_min.detach().reshape((1,)).requires_grad_(False)
-                self.reconstruct_label = False
-            else:
-                # DLG label recovery
-                # However this also improves conditioning for some LBFGS cases
-                self.reconstruct_label = True
-
-                def loss_fn(pred, labels):
-                    labels = torch.nn.functional.softmax(labels, dim=-1)
-                    return torch.mean(torch.sum(- labels * torch.nn.functional.log_softmax(pred, dim=-1), 1))
-                self.loss_fn = loss_fn
+        if False:
+            pass
+        # if labels is None:
+        #     if self.num_images == 1 and self.iDLG:
+        #         # iDLG trick:
+        #         last_weight_min = torch.argmin(torch.sum(input_data[-2], dim=-1), dim=-1)
+        #         labels = last_weight_min.detach().reshape((1,)).requires_grad_(False)
+        #         self.reconstruct_label = False
+        #     else:
+        #         # DLG label recovery
+        #         # However this also improves conditioning for some LBFGS cases
+        #         self.reconstruct_label = True
+        #
+        #         def loss_fn(pred, labels):
+        #             labels = torch.nn.functional.softmax(labels, dim=-1)
+        #             return torch.mean(torch.sum(- labels * torch.nn.functional.log_softmax(pred, dim=-1), 1))
+        #         self.loss_fn = loss_fn
         else:
             assert labels.shape[0] == self.num_images
             self.reconstruct_label = False
@@ -129,18 +132,20 @@ class GradientReconstructor():
 
     def _run_trial(self, x_trial, input_data, labels, dryrun=False):
         x_trial.requires_grad = True
-        if self.reconstruct_label:
-            output_test = self.model(x_trial)
-            labels = torch.randn(output_test.shape[1]).to(**self.setup).requires_grad_(True)
-
-            if self.config['optim'] == 'adam':
-                optimizer = torch.optim.Adam([x_trial, labels], lr=self.config['lr'])
-            elif self.config['optim'] == 'sgd':  # actually gd
-                optimizer = torch.optim.SGD([x_trial, labels], lr=0.01, momentum=0.9, nesterov=True)
-            elif self.config['optim'] == 'LBFGS':
-                optimizer = torch.optim.LBFGS([x_trial, labels])
-            else:
-                raise ValueError()
+        if False:
+            pass
+        # if self.reconstruct_label:
+        #     output_test = self.model(x_trial)
+        #     labels = torch.randn(output_test.shape[1]).to(**self.setup).requires_grad_(True)
+        #
+        #     if self.config['optim'] == 'adam':
+        #         optimizer = torch.optim.Adam([x_trial, labels], lr=self.config['lr'])
+        #     elif self.config['optim'] == 'sgd':  # actually gd
+        #         optimizer = torch.optim.SGD([x_trial, labels], lr=0.01, momentum=0.9, nesterov=True)
+        #     elif self.config['optim'] == 'LBFGS':
+        #         optimizer = torch.optim.LBFGS([x_trial, labels])
+        #     else:
+        #         raise ValueError()
         else:
             if self.config['optim'] == 'adam':
                 optimizer = torch.optim.Adam([x_trial], lr=self.config['lr'])
@@ -192,10 +197,14 @@ class GradientReconstructor():
 
         def closure():
             optimizer.zero_grad()
-            self.model.zero_grad()
-            loss = self.loss_fn(self.model(x_trial), label)
-            gradient = torch.autograd.grad(loss, self.model.parameters(), create_graph=True)
-            rec_loss = reconstruction_costs([gradient], input_gradient,
+            grads = []
+            for model in self.models:
+                model.zero_grad()
+                loss = self.loss_fn(model(x_trial), label)
+
+                gradient = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+                grads.append(gradient)
+            rec_loss = reconstruction_costs(grads, input_gradient,
                                             cost_fn=self.config['cost_fn'], indices=self.config['indices'],
                                             weights=self.config['weights'])
 
@@ -209,11 +218,14 @@ class GradientReconstructor():
 
     def _score_trial(self, x_trial, input_gradient, label):
         if self.config['scoring_choice'] == 'loss':
-            self.model.zero_grad()
             x_trial.grad = None
-            loss = self.loss_fn(self.model(x_trial), label)
-            gradient = torch.autograd.grad(loss, self.model.parameters(), create_graph=False)
-            return reconstruction_costs([gradient], input_gradient,
+            grads = []
+            for model in self.models:
+                model.zero_grad()
+                loss = self.loss_fn(model(x_trial), label)
+                gradient = torch.autograd.grad(loss, model.parameters(), create_graph=False)
+                grads.append(gradient)
+            return reconstruction_costs(grads, input_gradient,
                                         cost_fn=self.config['cost_fn'], indices=self.config['indices'],
                                         weights=self.config['weights'])
         elif self.config['scoring_choice'] == 'tv':
@@ -233,12 +245,16 @@ class GradientReconstructor():
         elif self.config['scoring_choice'] == 'pixelmean':
             x_optimal = x.mean(dim=0, keepdims=False)
 
-        self.model.zero_grad()
-        if self.reconstruct_label:
-            labels = self.model(x_optimal).softmax(dim=1)
-        loss = self.loss_fn(self.model(x_optimal), labels)
-        gradient = torch.autograd.grad(loss, self.model.parameters(), create_graph=False)
-        stats['opt'] = reconstruction_costs([gradient], input_data,
+
+        # if self.reconstruct_label:
+        #     labels = self.model(x_optimal).softmax(dim=1)
+        grads = []
+        for model in self.models:
+            model.zero_grad()
+            loss = self.loss_fn(model(x_optimal), labels)
+            gradient = torch.autograd.grad(loss, model.parameters(), create_graph=False)
+            grads.append(gradient)
+        stats['opt'] = reconstruction_costs(grads, input_data,
                                             cost_fn=self.config['cost_fn'],
                                             indices=self.config['indices'],
                                             weights=self.config['weights'])
@@ -248,50 +264,51 @@ class GradientReconstructor():
 
 
 class FedAvgReconstructor(GradientReconstructor):
-    """Reconstruct an image from weights after n gradient descent steps."""
+    pass
+    # """Reconstruct an image from weights after n gradient descent steps."""
+    #
+    # def __init__(self, model, mean_std=(0.0, 1.0), local_steps=2, local_lr=1e-4,
+    #              config=DEFAULT_CONFIG, num_images=1, use_updates=True, batch_size=0):
+    #     """Initialize with model, (mean, std) and config."""
+    #     super().__init__(model, mean_std, config, num_images)
+    #     self.local_steps = local_steps
+    #     self.local_lr = local_lr
+    #     self.use_updates = use_updates
+    #     self.batch_size = batch_size
+    #
+    # def _gradient_closure(self, optimizer, x_trial, input_parameters, labels):
+    #     def closure():
+    #         optimizer.zero_grad()
+    #         self.model.zero_grad()
+    #         parameters = loss_steps(self.model, x_trial, labels, loss_fn=self.loss_fn,
+    #                                 local_steps=self.local_steps, lr=self.local_lr,
+    #                                 use_updates=self.use_updates,
+    #                                 batch_size=self.batch_size)
+    #         rec_loss = reconstruction_costs([parameters], input_parameters,
+    #                                         cost_fn=self.config['cost_fn'], indices=self.config['indices'],
+    #                                         weights=self.config['weights'])
+    #
+    #         if self.config['total_variation'] > 0:
+    #             rec_loss += self.config['total_variation'] * TV(x_trial)
+    #         rec_loss.backward()
+    #         if self.config['signed']:
+    #             x_trial.grad.sign_()
+    #         return rec_loss
+    #     return closure
 
-    def __init__(self, model, mean_std=(0.0, 1.0), local_steps=2, local_lr=1e-4,
-                 config=DEFAULT_CONFIG, num_images=1, use_updates=True, batch_size=0):
-        """Initialize with model, (mean, std) and config."""
-        super().__init__(model, mean_std, config, num_images)
-        self.local_steps = local_steps
-        self.local_lr = local_lr
-        self.use_updates = use_updates
-        self.batch_size = batch_size
-
-    def _gradient_closure(self, optimizer, x_trial, input_parameters, labels):
-        def closure():
-            optimizer.zero_grad()
-            self.model.zero_grad()
-            parameters = loss_steps(self.model, x_trial, labels, loss_fn=self.loss_fn,
-                                    local_steps=self.local_steps, lr=self.local_lr,
-                                    use_updates=self.use_updates,
-                                    batch_size=self.batch_size)
-            rec_loss = reconstruction_costs([parameters], input_parameters,
-                                            cost_fn=self.config['cost_fn'], indices=self.config['indices'],
-                                            weights=self.config['weights'])
-
-            if self.config['total_variation'] > 0:
-                rec_loss += self.config['total_variation'] * TV(x_trial)
-            rec_loss.backward()
-            if self.config['signed']:
-                x_trial.grad.sign_()
-            return rec_loss
-        return closure
-
-    def _score_trial(self, x_trial, input_parameters, labels):
-        if self.config['scoring_choice'] == 'loss':
-            self.model.zero_grad()
-            parameters = loss_steps(self.model, x_trial, labels, loss_fn=self.loss_fn,
-                                    local_steps=self.local_steps, lr=self.local_lr, use_updates=self.use_updates)
-            return reconstruction_costs([parameters], input_parameters,
-                                        cost_fn=self.config['cost_fn'], indices=self.config['indices'],
-                                        weights=self.config['weights'])
-        elif self.config['scoring_choice'] == 'tv':
-            return TV(x_trial)
-        elif self.config['scoring_choice'] == 'inception':
-            # We do not care about diversity here!
-            return self.inception(x_trial)
+    # def _score_trial(self, x_trial, input_parameters, labels):
+    #     if self.config['scoring_choice'] == 'loss':
+    #         self.model.zero_grad()
+    #         parameters = loss_steps(self.model, x_trial, labels, loss_fn=self.loss_fn,
+    #                                 local_steps=self.local_steps, lr=self.local_lr, use_updates=self.use_updates)
+    #         return reconstruction_costs([parameters], input_parameters,
+    #                                     cost_fn=self.config['cost_fn'], indices=self.config['indices'],
+    #                                     weights=self.config['weights'])
+    #     elif self.config['scoring_choice'] == 'tv':
+    #         return TV(x_trial)
+    #     elif self.config['scoring_choice'] == 'inception':
+    #         # We do not care about diversity here!
+    #         return self.inception(x_trial)
 
 
 def loss_steps(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e-4, local_steps=4, use_updates=True, batch_size=0):
