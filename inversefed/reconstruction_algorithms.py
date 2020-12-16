@@ -44,11 +44,11 @@ def _validate_config(config):
 class GradientReconstructor():
     """Instantiate a reconstruction algorithm."""
 
-    def __init__(self, model, mean_std=(0.0, 1.0), config=DEFAULT_CONFIG, num_images=1):
+    def __init__(self, models, mean_std=(0.0, 1.0), config=DEFAULT_CONFIG, num_images=1):
         """Initialize with algorithm setup."""
         self.config = _validate_config(config)
-        self.models = [model]
-        self.setup = dict(device=next(model.parameters()).device, dtype=next(model.parameters()).dtype)
+        self.models = models
+        self.setup = dict(device=next(models[0].parameters()).device, dtype=next(models[0].parameters()).dtype)
 
         self.mean_std = mean_std
         self.num_images = num_images

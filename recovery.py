@@ -19,7 +19,8 @@ models = []
 for i in range(2):
     model = torchvision.models.resnet18(pretrained=trained_model)
     model.to(**setup)
-    model.eval();
+    model.eval()
+    model.zero_grad()
     models.append(model)
 
 dm = torch.as_tensor(inversefed.consts.cifar10_mean, **setup)[:, None, None]
@@ -49,10 +50,14 @@ print([trainloader.dataset.classes[l] for l in labels]);
 ground_truth_denormalized = torch.clamp(ground_truth * ds + dm, 0, 1)
 torchvision.utils.save_image(ground_truth_denormalized, f'{idx}_{arch}_{dataset_name}_input.png')
 
-model.zero_grad()
-target_loss, _, _ = loss_fn(model(ground_truth), labels)
-input_gradient = torch.autograd.grad(target_loss, model.parameters())
-input_gradient = [grad.detach() for grad in input_gradient]
+tls = [loss_fn(model(ground_truth), labels)[0] for model in models]
+input_gradient = [torch.autograd.grad(tl, model.parameters()) for tl, model in zip(tls, models)]
+avg_input_gradient = [0]*len(input_gradient[0])
+for grad in input_gradient:
+    for i, tens in enumerate(grad):
+        avg_input_gradient[i] += tens / len(input_gradient)
+avg_input_gradient = tuple(avg_input_gradient)
+input_gradient = [grad.detach() for grad in avg_input_gradient]
 full_norm = torch.stack([g.norm() for g in input_gradient]).mean()
 print(f'Full gradient norm is {full_norm:e}.')
 
