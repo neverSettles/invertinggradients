@@ -3,7 +3,7 @@ import torchvision
 import matplotlib.pyplot as plt
 
 # Choose variants here:
-trained_model = False
+trained_model = True
 arch = 'ResNet18'
 dataset_name = 'CIFAR10'
 
@@ -41,16 +41,20 @@ def plot(tensor):
 idx = 4
 # 4 # the frog
 
-img, label = validloader.dataset[idx]
-labels = torch.as_tensor((label,), device=setup['device'])
-ground_truth = img.to(**setup).unsqueeze(0)
-plot(ground_truth);
-print([trainloader.dataset.classes[l] for l in labels]);
+gts, all_labels = [], []
+for i in range(idx, idx + len(models)):
+    img, label = validloader.dataset[i]
+    labels = torch.as_tensor((label,), device=setup['device'])
+    ground_truth = img.to(**setup).unsqueeze(0)
+    gts.append(ground_truth)
+    all_labels.append(labels)
+    plot(ground_truth)
+    print([trainloader.dataset.classes[l] for l in labels])
 
-ground_truth_denormalized = torch.clamp(ground_truth * ds + dm, 0, 1)
-torchvision.utils.save_image(ground_truth_denormalized, f'{idx}_{arch}_{dataset_name}_input.png')
+    ground_truth_denormalized = torch.clamp(ground_truth * ds + dm, 0, 1)
+    torchvision.utils.save_image(ground_truth_denormalized, f'{idx}_{arch}_{dataset_name}_input.png')
 
-tls = [loss_fn(model(ground_truth), labels)[0] for model in models]
+tls = [loss_fn(model(gt), labels)[0] for gt, labels, model in zip(gts, all_labels, models)]
 input_gradient = [torch.autograd.grad(tl, model.parameters()) for tl, model in zip(tls, models)]
 avg_input_gradient = [0]*len(input_gradient[0])
 for grad in input_gradient:
@@ -77,17 +81,17 @@ def reconstruct_image():
                   lr_decay=True,
                   scoring_choice='loss')
     rec_machine = inversefed.GradientReconstructor(models, (dm, ds), config, num_images=1)
-    output, stats = rec_machine.reconstruct(input_gradient, labels, img_shape=(3, 32, 32))
+    output, stats = rec_machine.reconstruct(input_gradient, all_labels, img_shape=(3, 32, 32))
 
-    test_mse = (output.detach() - ground_truth).pow(2).mean()
-    feat_mse = (model(output.detach()) - model(ground_truth)).pow(2).mean()
-    test_psnr = inversefed.metrics.psnr(output, ground_truth)
+    test_mse = sum([(output.detach() - gt).pow(2).mean() for gt in gts])
+    feat_mse = sum([(model(output.detach()) - model(ground_truth)).pow(2).mean() for gt in gts])
+    test_psnr = sum([inversefed.metrics.psnr(output, ground_truth) for gt in gts])
 
     plot(output)
     plt.title(f"Rec. loss: {stats['opt']:2.4f} | MSE: {test_mse:2.4f} "
               f"| PSNR: {test_psnr:4.2f} | FMSE: {feat_mse:2.4e} |");
 
-    data = inversefed.metrics.activation_errors(model, output, ground_truth)
+    data = inversefed.metrics.activation_errors(model, output, gts[0])
 
     fig, axes = plt.subplots(2, 3, sharey=False, figsize=(14, 8))
     axes[0, 0].semilogy(list(data['se'].values())[:-3])
@@ -108,7 +112,7 @@ def reconstruct_image():
     bns = [val for key, val in data['mse'].items() if 'bn' in key]
     axes[1, 2].plot(bns)
     axes[1, 2].set_title('MSE - bn layers')
-    fig.suptitle('Error between layers');
+    fig.suptitle('Error between layers')
     plt.savefig('Figures.png')
     return output
 
